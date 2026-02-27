@@ -25,10 +25,10 @@ export default async function handler(req, res) {
     const sections = parsedData?.data?.[0]?.data?.sections ||[];
 
     let moreFromTitle = "More from Artist";
-    let moreFromItemsRaw = [];
+    let moreFromItemsRaw =[];
     let youMightAlsoLikeItemsRaw =[];
 
-    // 3. Helper function to extract base info and the Album URL
+    // 3. Helper function to extract base info
     const extractRaw = (items) => {
       if (!items) return[];
       return items.map(item => ({
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
       })).filter(i => i.albumUrl !== '');
     };
 
-    // 4. Loop through sections
+    // 4. Loop through sections to find the required lists
     sections.forEach(section => {
       const sectionId = section.id || '';
       const headerTitle = section.header?.item?.titleLink?.title || section.header?.item?.title || '';
@@ -53,27 +53,63 @@ export default async function handler(req, res) {
       }
     });
 
-    // 5. Upgrade function: Call iTunes API to get the exact Song URL (with ?i=...)
-    const fetchExactSongUrl = async (item) => {
+    // 5. Ultimate Upgrade: Get exact Apple Music URL AND Spotify URL
+    const fetchExactUrls = async (item) => {
+      let songLink = item.albumUrl;
+      let spotifyUrl = null;
+
       try {
-        // Query the iTunes API with the Album URL (limit=1 for speed)
+        // Query iTunes API to get the exact Apple Music Track URL
         const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(item.albumUrl)}&entity=song&country=IN&limit=1`);
         const itunesData = await itunesRes.json();
         
         if (itunesData.results && itunesData.results.length > 0) {
-          // Get the trackViewUrl and split at '&' to remove tracking tags like '&uo=4'
-          const exactUrl = itunesData.results[0].trackViewUrl.split('&')[0];
-          return { songName: item.songName, artistName: item.artistName, songLink: exactUrl };
+          // Get the clean Apple Music URL
+          songLink = itunesData.results[0].trackViewUrl.split('&')[0];
+          
+          // Extract the track ID (the numbers after ?i=)
+          const trackIdMatch = songLink.match(/\?i=(\d+)/);
+          
+          if (trackIdMatch && trackIdMatch[1]) {
+            const trackId = trackIdMatch[1];
+            
+            // Now, use that ID to hit Song.link to get the Spotify URL!
+            const songlinkRes = await fetch(`https://song.link/i/${trackId}`);
+            const songlinkHtml = await songlinkRes.text();
+            
+            // Extract the data from song.link just like we did in step 1!
+            const slMatch = songlinkHtml.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+            if (slMatch && slMatch[1]) {
+              const slData = JSON.parse(slMatch[1]);
+              const slSections = slData.props?.pageProps?.pageData?.sections ||[];
+              
+              // Loop to find Spotify
+              for (const slSection of slSections) {
+                if (slSection.links) {
+                  const sLink = slSection.links.find(l => l.platform === 'spotify');
+                  if (sLink) {
+                    spotifyUrl = sLink.url;
+                    break;
+                  }
+                }
+              }
+            }
+          }
         }
       } catch (e) {
-        // If iTunes API fails for some reason, fallback to original album URL
+        // If anything fails, it will just quietly fallback to null for Spotify
       }
-      return { songName: item.songName, artistName: item.artistName, songLink: item.albumUrl };
+      return { 
+        songName: item.songName, 
+        artistName: item.artistName, 
+        songLink: songLink,
+        spotifyUrl: spotifyUrl // Added!
+      };
     };
 
-    // 6. Run all iTunes API requests at the same time (Promise.all) so it doesn't slow down your API
-    const moreFromItems = await Promise.all(moreFromItemsRaw.map(fetchExactSongUrl));
-    const youMightAlsoLikeItems = await Promise.all(youMightAlsoLikeItemsRaw.map(fetchExactSongUrl));
+    // 6. Run ALL requests in parallel so your API is incredibly fast
+    const moreFromItems = await Promise.all(moreFromItemsRaw.map(fetchExactUrls));
+    const youMightAlsoLikeItems = await Promise.all(youMightAlsoLikeItemsRaw.map(fetchExactUrls));
 
     // 7. Return the final output
     return res.status(200).json({ 
@@ -91,4 +127,4 @@ export default async function handler(req, res) {
   } catch (error) {
     return res.status(500).json({ error: 'Failed to fetch data.', details: error.message });
   }
-                                }
+}
